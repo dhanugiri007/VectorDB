@@ -25,25 +25,6 @@ The emphasis is on understanding implementation trade-offs rather than maximizin
 
 ## System Overview
 
-```
-Client
-   │
-HTTP
-   │
-Server
-   │
-Search Engine
- ├── Brute Force
- ├── KD-Tree
- └── HNSW (experimental)
-   │
-Distance Metrics
- ├── Cosine
- ├── Euclidean
- └── Manhattan
-   │
-Vector Storage
-```
 <img width="898" height="729" alt="Screenshot 2026-07-26 175829" src="https://github.com/user-attachments/assets/c80ee20c-bc28-435f-be95-e740ce877c3a" />
 
 The HTTP layer is responsible only for request parsing and response serialization. Search algorithms operate independently from the transport layer, allowing implementations to be evaluated without modifying the client.
