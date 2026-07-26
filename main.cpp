@@ -520,7 +520,14 @@ int main() {
         cout << "first few values " << testEmbedding[0] << "," << testEmbedding[1] << ", " << testEmbedding[2] << "\n";
     }
     httplib::Server svr;
-
+    svr.set_default_headers({
+    {"Access-Control-Allow-Origin", "*"},
+    {"Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"},
+    {"Access-Control-Allow-Headers", "Content-Type"}
+});
+svr.Options(".*", [](const httplib::Request&, httplib::Response& res) {
+    res.status = 200;
+});
     svr.Post("/insert", [&db](const httplib::Request& req, httplib::Response& res) {
         try {
             json body = json::parse(req.body);
