@@ -1,3 +1,6 @@
+#include "httplib.h"
+#include "json.hpp"
+using json = nlohmann::json;
 #include <vector>
 #include <string>
 #include <cmath>
@@ -436,26 +439,66 @@ private:
     }
 };
 int main() {
-    
     VectorDB db;
-    db.insert({1, "point A", {1.0f, 0.0f, 0.0f}});
-    db.insert({2, "point B", {0.0f, 1.0f, 0.0f}});
-    db.insert({3, "point C", {0.9f, 0.1f, 0.0f}});
-    db.insert({4, "point D", {0.0f, 0.0f, 1.0f}});
-    db.insert({5, "point E", {0.8f, 0.2f, 0.0f}});
 
-    vector<float> query = {1.0f, 0.0f, 0.0f};
+    httplib::Server svr;
 
-    auto bf = db.search(query, 3, VectorDB::IndexType::BruteForceIdx);
-    auto kd = db.search(query, 3, VectorDB::IndexType::KDTreeIdx);
-    auto hn = db.search(query, 3, VectorDB::IndexType::HNSWIdx);
+    svr.Post("/insert", [&db](const httplib::Request& req, httplib::Response& res) {
+        try {
+            json body = json::parse(req.body);
 
-    cout << "BruteForce:\n";
-    for (auto& p : bf) cout << "  " << p.first.label << " dist=" << p.second << "\n";
-    cout << "KDTree:\n";
-    for (auto& p : kd) cout << "  " << p.first.label << " dist=" << p.second << "\n";
-    cout << "HNSW:\n";
-    for (auto& p : hn) cout << "  " << p.first.label << " dist=" << p.second << "\n";
+            VectorItem item;
+            item.id = body["id"];
+            item.label = body["label"];
+            item.values = body["values"].get<std::vector<float>>();
+
+            db.insert(item);
+
+            json response = {{"status", "ok"}, {"size", db.size()}};
+            res.set_content(response.dump(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+        }
+    });
+
+    svr.Post("/search", [&db](const httplib::Request& req, httplib::Response& res) {
+        try {
+            json body = json::parse(req.body);
+
+            std::vector<float> query = body["query"].get<std::vector<float>>();
+            int k = body.value("k", 5);
+            std::string mode = body.value("mode", "brute"); // "brute" | "kdtree" | "hnsw"
+
+            VectorDB::IndexType type = VectorDB::IndexType::BruteForceIdx;
+            if (mode == "kdtree") type = VectorDB::IndexType::KDTreeIdx;
+            else if (mode == "hnsw") type = VectorDB::IndexType::HNSWIdx;
+
+            auto results = db.search(query, k, type);
+
+            json resultsJson = json::array();
+            for (const auto& pair : results) {
+                resultsJson.push_back({
+                    {"id", pair.first.id},
+                    {"label", pair.first.label},
+                    {"distance", pair.second}
+                });
+            }
+
+            res.set_content(json{{"results", resultsJson}}.dump(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+        }
+    });
+
+    svr.Get("/size", [&db](const httplib::Request& req, httplib::Response& res) {
+        json response = {{"size", db.size()}};
+        res.set_content(response.dump(), "application/json");
+    });
+
+    std::cout << "Server running on http://localhost:8080\n";
+    svr.listen("0.0.0.0", 8080);
 
     return 0;
 }
