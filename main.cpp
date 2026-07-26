@@ -438,9 +438,87 @@ private:
         }
     }
 };
+class OllamaClient {
+public:
+    OllamaClient(const std::string& host = "localhost", int port = 11434)
+        : cli_(host, port) {}
+
+    // Returns the embedding vector for a piece of text, or empty vector on failure.
+    std::vector<float> embed(const std::string& text, const std::string& model = "nomic-embed-text") {
+        json body = {{"model", model}, {"prompt", text}};
+        auto res = cli_.Post("/api/embeddings", body.dump(), "application/json");
+
+        if (!res || res->status != 200) {
+            std::cerr << "Ollama embed failed: " << (res ? res->body : "no response") << "\n";
+            return {};
+        }
+
+        json j = json::parse(res->body);
+        return j["embedding"].get<std::vector<float>>();
+    }
+
+    // Sends a prompt to the LLM and returns the generated text (non-streaming).
+    std::string generate(const std::string& prompt, const std::string& model = "llama3.2") {
+        json body = {{"model", model}, {"prompt", prompt}, {"stream", false}};
+        auto res = cli_.Post("/api/generate", body.dump(), "application/json");
+
+        if (!res || res->status != 200) {
+            std::cerr << "Ollama generate failed: " << (res ? res->body : "no response") << "\n";
+            return "";
+        }
+
+        json j = json::parse(res->body);
+        return j["response"].get<std::string>();
+    }
+
+private:
+    httplib::Client cli_;
+};
+
+struct DocItem {
+    int id;
+    string text;
+    vector<float> embedding;
+};
+
+class DocumentDB {
+public:
+    void addDocument(int id, const string& text, OllamaClient& ollama) {
+        vector<float> emb = ollama.embed(text);
+        docs_.push_back({id, text, emb});
+    }
+
+    // Returns the top-k most relevant documents' text, given a query embedding.
+    vector<string> retrieve(const vector<float>& queryEmbedding, int k) {
+        vector<pair<float, int>> scored; // (distance, index into docs_)
+        for (int i = 0; i < (int)docs_.size(); i++) {
+            float d = euclideanDistance(queryEmbedding, docs_[i].embedding);
+            scored.push_back({d, i});
+        }
+        sort(scored.begin(), scored.end());
+
+        vector<string> results;
+        for (int i = 0; i < (int)scored.size() && i < k; i++) {
+            results.push_back(docs_[scored[i].second].text);
+        }
+        return results;
+    }
+
+    size_t size() const { return docs_.size(); }
+
+private:
+    vector<DocItem> docs_;
+};
+
+
 int main() {
     VectorDB db;
-
+    OllamaClient ollama;
+    auto testEmbedding = ollama.embed("hello world");
+    cout << "Embedding length: " << testEmbedding.size() << "\n";
+    if(!testEmbedding.empty()) {
+        cout << "first few values " << testEmbedding[0] << "," << testEmbedding[1] << ", " << testEmbedding[2] << "\n";
+    }
     httplib::Server svr;
 
     svr.Post("/insert", [&db](const httplib::Request& req, httplib::Response& res) {
@@ -496,6 +574,53 @@ int main() {
         json response = {{"size", db.size()}};
         res.set_content(response.dump(), "application/json");
     });
+
+    DocumentDB docDb;
+
+svr.Post("/doc/add", [&docDb, &ollama](const httplib::Request& req, httplib::Response& res) {
+    try {
+        json body = json::parse(req.body);
+        int id = body["id"];
+        string text = body["text"];
+
+        docDb.addDocument(id, text, ollama);
+
+        res.set_content(json{{"status", "ok"}, {"size", docDb.size()}}.dump(), "application/json");
+    } catch (const std::exception& e) {
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+});
+
+svr.Post("/doc/ask", [&docDb, &ollama](const httplib::Request& req, httplib::Response& res) {
+    try {
+        json body = json::parse(req.body);
+        string question = body["question"];
+        int k = body.value("k", 3);
+
+        // 1. Embed the question
+        auto qEmb = ollama.embed(question);
+
+        // 2. Retrieve relevant chunks
+        auto chunks = docDb.retrieve(qEmb, k);
+
+        // 3. Build a prompt with retrieved context
+        string prompt = "Answer the question using only the context below.\n\nContext:\n";
+        for (auto& c : chunks) prompt += "- " + c + "\n";
+        prompt += "\nQuestion: " + question + "\nAnswer:";
+
+        // 4. Generate the answer
+        string answer = ollama.generate(prompt);
+
+        res.set_content(json{
+            {"answer", answer},
+            {"retrieved_chunks", chunks}
+        }.dump(), "application/json");
+    } catch (const std::exception& e) {
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+});
 
     std::cout << "Server running on http://localhost:8080\n";
     svr.listen("0.0.0.0", 8080);
