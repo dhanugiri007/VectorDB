@@ -1,9 +1,11 @@
 #include <vector>
 #include <string>
 #include <cmath>
-
 #include <algorithm> 
 #include <iostream>
+#include <queue>
+#include <unordered_set>
+#include <random>
 
 using namespace std;
 
@@ -113,7 +115,6 @@ public:
         return root_;
     }
 
-    // Public entry point for search
     vector<pair<VectorItem, float>> search(const vector<float>& query, int k) {
         vector<pair<VectorItem, float>> best;
         searchRecursive(root_, query, 0, k, best);
@@ -184,13 +185,206 @@ private:
     }
 };
 
+class HNSW {
+public:
+    HNSW(int M = 8, int efConstruction = 100)
+        : M_(M), efConstruction_(efConstruction) {}
+
+    void insert(const VectorItem& item) {
+        int newIdx = (int)nodes_.size();
+        int l = randomLayer();
+
+        Node newNode;
+        newNode.item = item;
+        newNode.topLayer = l;
+        newNode.neighbors.resize(l + 1);
+        nodes_.push_back(newNode);
+
+        if (entryPoint_ == -1) {
+            entryPoint_ = newIdx;
+            maxLayer_ = l;
+            return;
+        }
+
+        int currObj = entryPoint_;
+        int topL = maxLayer_;
+
+        for (int layer = topL; layer > l; --layer) {
+            currObj = greedyClosest(currObj, item.values, layer);
+        }
+
+        vector<int> entryPoints = {currObj};
+        for (int layer = min(topL, l); layer >= 0; --layer) {
+            auto neighborsWithDist = searchLayer(item.values, entryPoints, efConstruction_, layer);
+            
+            vector<int> neighbors;
+            for (int i = (int)neighborsWithDist.size() - 1; i >= 0; --i) {
+                neighbors.push_back(neighborsWithDist[i].second);
+            }
+
+            if ((int)neighbors.size() > M_) {
+                neighbors.resize(M_);
+            }
+
+            nodes_[newIdx].neighbors[layer] = neighbors;
+            for (int neighborIdx : neighbors) {
+                nodes_[neighborIdx].neighbors[layer].push_back(newIdx);
+
+                if ((int)nodes_[neighborIdx].neighbors[layer].size() > M_) {
+                    auto& nList = nodes_[neighborIdx].neighbors[layer];
+                    sort(nList.begin(), nList.end(), [&](int a, int b) {
+                        return dist(nodes_[neighborIdx].item.values, nodes_[a].item.values) <
+                               dist(nodes_[neighborIdx].item.values, nodes_[b].item.values);
+                    });
+                    nList.resize(M_);
+                }
+            }
+
+            entryPoints.clear();
+            for (int n : neighbors) {
+                entryPoints.push_back(n);
+            }
+        }
+
+        if (l > maxLayer_) {
+            maxLayer_ = l;
+            entryPoint_ = newIdx;
+        }
+    }
+
+    vector<pair<VectorItem, float>> search(const vector<float>& query, int k, int efSearch = 50) {
+        if (entryPoint_ == -1) return {};
+
+        int currObj = entryPoint_;
+        int topL = maxLayer_;
+
+        for (int layer = topL; layer > 0; --layer) {
+            currObj = greedyClosest(currObj, query, layer);
+        }
+
+        int ef = max(efSearch, k);
+        auto candidates = searchLayer(query, {currObj}, ef, 0);
+
+        vector<pair<VectorItem, float>> results;
+        for (int i = (int)candidates.size() - 1; i >= 0 && (int)results.size() < k; --i) {
+            results.push_back({nodes_[candidates[i].second].item, candidates[i].first});
+        }
+
+        return results;
+    }
+
+private:
+    struct Node {
+        VectorItem item;
+        int topLayer;
+        vector<vector<int>> neighbors;
+    };
+
+    vector<Node> nodes_;
+    int entryPoint_ = -1;
+    int maxLayer_ = -1;
+    int M_;
+    int efConstruction_;
+
+    int randomLayer() {
+        static mt19937 rng(random_device{}());
+        static uniform_real_distribution<double> dist(0.0, 1.0);
+        double r = dist(rng);
+        double levelMult = 1.0 / log((double)M_);
+        return (int)(-log(r) * levelMult);
+    }
+
+    float dist(const vector<float>& a, const vector<float>& b) {
+        return euclideanDistance(a, b);
+    }
+
+    int greedyClosest(int entry, const vector<float>& query, int layer) {
+        int current = entry;
+        float currentDist = dist(query, nodes_[current].item.values);
+        bool improved = true;
+        while (improved) {
+            improved = false;
+            if (layer < (int)nodes_[current].neighbors.size()) {
+                for (int neighborIdx : nodes_[current].neighbors[layer]) {
+                    float d = dist(query, nodes_[neighborIdx].item.values);
+                    if (d < currentDist) {
+                        currentDist = d;
+                        current = neighborIdx;
+                        improved = true;
+                    }
+                }
+            }
+        }
+        return current;
+    }
+
+    vector<pair<float, int>> searchLayer(
+        const vector<float>& query,
+        const vector<int>& entryPoints,
+        int ef,
+        int layer
+    ) {
+        unordered_set<int> visited;
+        priority_queue<pair<float, int>, 
+                       vector<pair<float, int>>, 
+                       greater<pair<float, int>>> candidates;
+        
+        priority_queue<pair<float, int>> W;
+
+        for (int ep : entryPoints) {
+            float d = dist(query, nodes_[ep].item.values);
+            visited.insert(ep);
+            candidates.push({d, ep});
+            W.push({d, ep});
+        }
+
+        while (!candidates.empty()) {
+            // FIXED: Replaced C++17 structured bindings with direct pair access
+            pair<float, int> currentCandidate = candidates.top();
+            float cDist = currentCandidate.first;
+            int cNode = currentCandidate.second;
+            candidates.pop();
+
+            if (W.empty()) break; // Safety check
+
+            pair<float, int> furthestInW = W.top();
+            float fDist = furthestInW.first;
+
+            if (cDist > fDist) break;
+
+            if (layer < (int)nodes_[cNode].neighbors.size()) {
+                for (int neighbor : nodes_[cNode].neighbors[layer]) {
+                    if (visited.find(neighbor) == visited.end()) {
+                        visited.insert(neighbor);
+                        float d = dist(query, nodes_[neighbor].item.values);
+
+                        if (d < W.top().first || (int)W.size() < ef) {
+                            candidates.push({d, neighbor});
+                            W.push({d, neighbor});
+                            if ((int)W.size() > ef) {
+                                W.pop();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        vector<pair<float, int>> result;
+        while (!W.empty()) {
+            result.push_back(W.top());
+            W.pop();
+        }
+        return result;
+    }
+};
+
 void printTree(KDNode* node, int depth = 0) {
     if (node == nullptr) return;
     printTree(node->left, depth + 1);
     cout << string(depth * 2, ' ') << node->item.label << "\n";
     printTree(node->right, depth + 1);
 }
-
 
 
 int main() {
@@ -222,8 +416,14 @@ int main() {
     KDTree tree;
     tree.build(db.items);
 
+    HNSW hnsw;
+    for (const auto& item : db.items) {
+        hnsw.insert(item);
+    }
+
     auto bfResults = db.search(query, 3, euclideanDistance);
     auto kdResults = tree.search(query, 3);
+    auto hnswResults = hnsw.search(query, 3);
 
     cout << "\nBruteForce (euclidean):\n";
     for (auto& pair : bfResults)
@@ -231,6 +431,10 @@ int main() {
 
     cout << "\nKDTree (euclidean):\n";
     for (auto& pair : kdResults)
+        cout << "  " << pair.first.label << " dist=" << pair.second << "\n";
+
+    cout << "\nHNSW (euclidean):\n";
+    for (auto& pair : hnswResults)
         cout << "  " << pair.first.label << " dist=" << pair.second << "\n";
 
     return 0;
