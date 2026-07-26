@@ -386,18 +386,58 @@ void printTree(KDNode* node, int depth = 0) {
     printTree(node->right, depth + 1);
 }
 
+class VectorDB {
+public:
+    enum class IndexType { BruteForceIdx, KDTreeIdx, HNSWIdx };
 
+    void insert(const VectorItem& item) {
+        allItems_.push_back(item);
+        brute_.insert(item);
+        hnsw_.insert(item);
+        kdDirty_ = true;   // rebuild KDTree lazily on next search (it doesn't support incremental insert)
+    }
+
+    bool remove(int id) {
+        bool removed = brute_.remove(id);
+        allItems_.erase(remove_if(allItems_.begin(), allItems_.end(),
+            [id](const VectorItem& it) { return it.id == id; }), allItems_.end());
+        kdDirty_ = true;
+        // Note: HNSW doesn't support true deletion in this simple version — known limitation, flag it in your README.
+        return removed;
+    }
+
+    vector<pair<VectorItem, float>> search(const vector<float>& query, int k, IndexType type) {
+        switch (type) {
+            case IndexType::BruteForceIdx:
+                return brute_.search(query, k, euclideanDistance);
+            case IndexType::KDTreeIdx:
+                rebuildKDTreeIfNeeded();
+                return kdtree_.search(query, k);
+            case IndexType::HNSWIdx:
+                return hnsw_.search(query, k);
+        }
+        return {};
+    }
+
+    size_t size() const { return allItems_.size(); }
+
+private:
+    vector<VectorItem> allItems_;
+    BruteForce brute_;
+    KDTree kdtree_;
+    HNSW hnsw_;
+    bool kdDirty_ = true;
+
+    void rebuildKDTreeIfNeeded() {
+        if (kdDirty_) {
+            kdtree_.build(allItems_);
+            kdDirty_ = false;
+        }
+    }
+};
 int main() {
-    vector<float> v1 = {1.0f, 0.0f, 0.0f};
-    vector<float> v2 = {0.0f, 1.0f, 0.0f};
-    vector<float> v3 = {1.0f, 0.1f, 0.0f};
-
-    cout << "cosine(v1,v2): " << cosineDistance(v1, v2) << endl;
-    cout << "cosine(v1,v3): " << cosineDistance(v1, v3) << endl;
-    cout << "euclidean(v1,v2): " << euclideanDistance(v1, v2) << endl;
-    cout << "manhattan(v1,v2): " << manhattanDistance(v1, v2) << endl;
-
-    BruteForce db;
+    
+    VectorDB db;
     db.insert({1, "point A", {1.0f, 0.0f, 0.0f}});
     db.insert({2, "point B", {0.0f, 1.0f, 0.0f}});
     db.insert({3, "point C", {0.9f, 0.1f, 0.0f}});
@@ -405,37 +445,17 @@ int main() {
     db.insert({5, "point E", {0.8f, 0.2f, 0.0f}});
 
     vector<float> query = {1.0f, 0.0f, 0.0f};
-    auto results = db.search(query, 3, cosineDistance);
-    cout << "\nTop 3 nearest to (1,0,0) by cosine distance:\n";
-    for (const auto& pair : results) {
-        cout << "  id=" << pair.first.id 
-             << " label=" << pair.first.label
-             << " dist=" << pair.second << "\n";
-    }
 
-    KDTree tree;
-    tree.build(db.items);
+    auto bf = db.search(query, 3, VectorDB::IndexType::BruteForceIdx);
+    auto kd = db.search(query, 3, VectorDB::IndexType::KDTreeIdx);
+    auto hn = db.search(query, 3, VectorDB::IndexType::HNSWIdx);
 
-    HNSW hnsw;
-    for (const auto& item : db.items) {
-        hnsw.insert(item);
-    }
-
-    auto bfResults = db.search(query, 3, euclideanDistance);
-    auto kdResults = tree.search(query, 3);
-    auto hnswResults = hnsw.search(query, 3);
-
-    cout << "\nBruteForce (euclidean):\n";
-    for (auto& pair : bfResults)
-        cout << "  " << pair.first.label << " dist=" << pair.second << "\n";
-
-    cout << "\nKDTree (euclidean):\n";
-    for (auto& pair : kdResults)
-        cout << "  " << pair.first.label << " dist=" << pair.second << "\n";
-
-    cout << "\nHNSW (euclidean):\n";
-    for (auto& pair : hnswResults)
-        cout << "  " << pair.first.label << " dist=" << pair.second << "\n";
+    cout << "BruteForce:\n";
+    for (auto& p : bf) cout << "  " << p.first.label << " dist=" << p.second << "\n";
+    cout << "KDTree:\n";
+    for (auto& p : kd) cout << "  " << p.first.label << " dist=" << p.second << "\n";
+    cout << "HNSW:\n";
+    for (auto& p : hn) cout << "  " << p.first.label << " dist=" << p.second << "\n";
 
     return 0;
 }
